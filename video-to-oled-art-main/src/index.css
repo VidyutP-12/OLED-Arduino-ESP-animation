@@ -1,0 +1,231 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    --background: 220 27% 6%;
+    --foreground: 210 40% 98%;
+
+    --card: 220 23% 8%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 220 23% 8%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 193 100% 50%;
+    --primary-foreground: 220 27% 6%;
+
+    --secondary: 220 20% 12%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 220 20% 12%;
+    --muted-foreground: 215 20.2% 65.1%;
+
+    --accent: 193 100% 50%;
+    --accent-foreground: 220 27% 6%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 220 20% 15%;
+    --input: 220 20% 15%;
+    --ring: 193 100% 50%;
+
+    --radius: 0.75rem;
+
+    /* Custom design tokens */
+    --electric-blue: 193 100% 50%;
+    --electric-glow: 193 100% 70%;
+    --tech-bg: 220 27% 6%;
+    --tech-surface: 220 23% 8%;
+    --tech-border: 220 20% 15%;
+    
+    /* Gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(var(--electric-blue)) 0%, hsl(var(--electric-glow)) 100%);
+    --gradient-hero: linear-gradient(135deg, hsl(var(--tech-bg)) 0%, hsl(220 25% 9%) 100%);
+    --gradient-card: linear-gradient(145deg, hsl(var(--tech-surface)) 0%, hsl(220 25% 10%) 100%);
+    
+    /* Shadows */
+    --shadow-electric: 0 0 30px hsl(var(--electric-blue) / 0.3);
+    --shadow-glow: 0 0 60px hsl(var(--electric-glow) / 0.2);
+    --shadow-card: 0 10px 30px -10px hsl(220 30% 3% / 0.5);
+
+    --radius: 0.75rem;
+
+    --sidebar-background: 0 0% 98%;
+
+    --sidebar-foreground: 240 5.3% 26.1%;
+
+    --sidebar-primary: 240 5.9% 10%;
+
+    --sidebar-primary-foreground: 0 0% 98%;
+
+    --sidebar-accent: 240 4.8% 95.9%;
+
+    --sidebar-accent-foreground: 240 5.9% 10%;
+
+    --sidebar-border: 220 13% 91%;
+
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+
+  .dark {
+    /* Dark mode uses the same dark theme */
+    --background: 220 27% 6%;
+    --foreground: 210 40% 98%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Custom tech theme colors */
+:root {
+  --tech-bg: #0a0a0a;
+  --tech-surface: #1a1a1a;
+  --tech-border: #2a2a2a;
+  --tech-text: #e0e0e0;
+  --tech-muted: #888888;
+  --tech-primary: #00d4ff;
+  --tech-primary-dark: #0099cc;
+  --tech-accent: #ff6b35;
+  --tech-success: #00ff88;
+  --tech-warning: #ffaa00;
+  --tech-error: #ff4444;
+}
+
+/* Gradient backgrounds */
+.bg-gradient-hero {
+  background: linear-gradient(135deg, var(--tech-bg) 0%, #1a1a2e 50%, #16213e 100%);
+}
+
+.bg-gradient-card {
+  background: linear-gradient(135deg, var(--tech-surface) 0%, rgba(26, 26, 46, 0.8) 100%);
+}
+
+.bg-gradient-primary {
+  background: linear-gradient(135deg, var(--tech-primary) 0%, var(--tech-primary-dark) 100%);
+}
+
+/* Tech borders */
+.border-tech-border {
+  border-color: var(--tech-border);
+}
+
+/* Electric shadow effect */
+.shadow-electric {
+  box-shadow: 0 0 20px rgba(0, 212, 255, 0.3), 0 0 40px rgba(0, 212, 255, 0.1);
+}
+
+/* Floating animation */
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-10px); }
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+/* Card hover effects */
+.card-hover {
+  transition: all 0.3s ease;
+}
+
+.card-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+}
+
+/* Custom slider styling */
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 8px;
+  border-radius: 4px;
+  outline: none;
+  transition: all 0.2s ease;
+}
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--tech-primary);
+  cursor: pointer;
+  border: 2px solid var(--tech-surface);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  transition: all 0.2s ease;
+}
+
+.slider::-webkit-slider-thumb:hover {
+  background: var(--tech-primary-dark);
+  transform: scale(1.1);
+  box-shadow: 0 4px 12px rgba(0, 212, 255, 0.4);
+}
+
+.slider::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--tech-primary);
+  cursor: pointer;
+  border: 2px solid var(--tech-surface);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  transition: all 0.2s ease;
+}
+
+.slider::-moz-range-thumb:hover {
+  background: var(--tech-primary-dark);
+  transform: scale(1.1);
+}
+
+/* Frame navigation slider specific styling */
+.frame-slider {
+  background: linear-gradient(to right, var(--tech-primary) 0%, var(--tech-primary) 50%, var(--tech-border) 50%, var(--tech-border) 100%);
+}
+
+/* Processing animations */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.animate-pulse-slow {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+/* Status indicators */
+.status-processing {
+  background: linear-gradient(135deg, rgba(0, 212, 255, 0.1) 0%, rgba(0, 212, 255, 0.05) 100%);
+  border: 1px solid rgba(0, 212, 255, 0.2);
+}
+
+.status-success {
+  background: linear-gradient(135deg, rgba(0, 255, 136, 0.1) 0%, rgba(0, 255, 136, 0.05) 100%);
+  border: 1px solid rgba(0, 255, 136, 0.2);
+}
+
+.status-warning {
+  background: linear-gradient(135deg, rgba(255, 170, 0, 0.1) 0%, rgba(255, 170, 0, 0.05) 100%);
+  border: 1px solid rgba(255, 170, 0, 0.2);
+}
+
+.status-error {
+  background: linear-gradient(135deg, rgba(255, 68, 68, 0.1) 0%, rgba(255, 68, 68, 0.05) 100%);
+  border: 1px solid rgba(255, 68, 68, 0.2);
+}
