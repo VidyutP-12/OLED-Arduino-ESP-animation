@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { VideoUploader } from '@/components/VideoUploader';
@@ -35,120 +35,196 @@ const Index = () => {
   const [maxFrames, setMaxFrames] = useState(0);
 
   const { toast } = useToast();
+  
+  // Refs for debouncing and cleanup
+  const processingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const codeGenerationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isProcessingRef = useRef(false);
 
-  const parseSize = (s: string): { w: number; h: number } => {
+  // Memoize parseSize function to prevent recreation on every render
+  const parseSize = useCallback((s: string): { w: number; h: number } => {
     if (s === 'custom') return { w: 128, h: 64 };
     const [w, h] = s.split('x').map((n) => parseInt(n, 10));
     return { w: w || 128, h: h || 64 };
-  };
+  }, []);
 
-  const handleVideoSelect = (file: File | null) => {
+  const handleVideoSelect = useCallback((file: File | null) => {
     setSelectedVideo(file);
     setGeneratedCode(null);
     setMaxFrames(0);
+    // Clear any pending processing
+    if (processingTimeoutRef.current) {
+      clearTimeout(processingTimeoutRef.current);
+      processingTimeoutRef.current = null;
+    }
     // Keep the current targetFrames setting when new video is selected
-  };
+  }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    const run = async () => {
-      if (!selectedVideo) {
-        setFramesMono([]);
-        setFramesPacked([]);
-        setGeneratedCode(null);
-        setMaxFrames(0);
-        return;
-      }
-      setIsProcessing(true);
-      try {
-        const { w, h } = parseSize(config.displaySize);
-        const res = await processVideo(selectedVideo, {
-          width: w,
-          height: h,
-          orientation: config.orientation as any,
-          targetFps: DEFAULT_FPS,
-          maxFrames: MAX_FRAMES,
-          targetFrames: config.targetFrames || 20, // Use config value or default to 20
-          threshold: 128,
-        });
-        if (cancelled) return;
-        setFramesMono(res.framesMono);
-        setFramesPacked(res.framesPacked);
-        setOledW(res.width);
-        setOledH(res.height);
-        setFps(res.fps);
-        setDuration(res.duration);
-        
-        // Calculate max frames based on video duration and target FPS
-        const calculatedMaxFrames = Math.floor(res.duration * DEFAULT_FPS);
-        setMaxFrames(calculatedMaxFrames);
-        
-        // Automatically generate Arduino code after video processing
-        if (res.framesPacked.length > 0) {
-          try {
-            console.log('Auto-generating Arduino code for', res.framesPacked.length, 'frames');
-            const code = generateArduinoCode(
-              res.framesPacked,
-              res.width,
-              res.height,
-              res.fps,
-              config.library as any
-            );
-            if (!cancelled) {
-              setGeneratedCode(code);
-              console.log('Auto-generated Arduino code successfully, length:', code.length);
-            }
-          } catch (e: any) {
-            console.error('Auto code generation failed:', e);
-            // Don't show error toast for auto-generation, just log it
-          }
-        }
-        
-        toast({
-          title: 'Video processed',
-          description: `${res.framesMono.length} frames @ ${Math.round(res.fps)} FPS (${res.width}x${res.height})${config.targetFrames ? ` (requested: ${config.targetFrames})` : ''}`,
-        });
-      } catch (e: any) {
-        console.error(e);
-        toast({ title: 'Processing failed', description: e?.message || 'Could not process video' });
-      } finally {
-        if (!cancelled) setIsProcessing(false);
-      }
-    };
-    run();
-    return () => { cancelled = true; };
-  }, [selectedVideo, config.displaySize, config.orientation, config.library]);
-
-  // Regenerate code when library changes (if we already have frames)
-  useEffect(() => {
-    if (framesPacked.length > 0 && !isProcessing) {
-      setIsRegenerating(true);
-      // Small delay to make the regeneration visible
-      setTimeout(() => {
+  // Debounced video processing function
+  const processVideoDebounced = useCallback(async (video: File, config: Config) => {
+    if (isProcessingRef.current) return;
+    
+    isProcessingRef.current = true;
+    setIsProcessing(true);
+    
+    console.log('Processing video with config:', {
+      targetFrames: config.targetFrames,
+      displaySize: config.displaySize,
+      orientation: config.orientation,
+      library: config.library
+    });
+    
+    try {
+      const { w, h } = parseSize(config.displaySize);
+      const res = await processVideo(video, {
+        width: w,
+        height: h,
+        orientation: config.orientation as any,
+        targetFps: 30, // Use higher FPS to allow more frames
+        maxFrames: MAX_FRAMES,
+        targetFrames: Math.min(config.targetFrames || 20, 20),
+        threshold: 128,
+      });
+      
+      console.log('Video processing result:', {
+        framesMono: res.framesMono.length,
+        framesPacked: res.framesPacked.length,
+        width: res.width,
+        height: res.height,
+        fps: res.fps,
+        duration: res.duration
+      });
+      
+      setFramesMono(res.framesMono);
+      setFramesPacked(res.framesPacked);
+      setOledW(res.width);
+      setOledH(res.height);
+      setFps(res.fps);
+      setDuration(res.duration);
+      
+      // Calculate max frames based on video duration and target FPS
+      const calculatedMaxFrames = Math.floor(res.duration * DEFAULT_FPS);
+      setMaxFrames(calculatedMaxFrames);
+      
+      // Automatically generate Arduino code after video processing
+      if (res.framesPacked.length > 0) {
         try {
-          console.log('Regenerating code due to library change:', { 
-            library: config.library, 
-            frameCount: framesPacked.length
-          });
+          console.log('Auto-generating Arduino code for', res.framesPacked.length, 'frames');
           const code = generateArduinoCode(
-            framesPacked,
-            oledW,
-            oledH,
-            fps,
+            res.framesPacked,
+            res.width,
+            res.height,
+            res.fps,
             config.library as any
           );
           setGeneratedCode(code);
-          console.log('Regenerated Arduino code successfully, length:', code.length);
+          console.log('Auto-generated Arduino code successfully, length:', code.length);
         } catch (e: any) {
-          console.error('Code regeneration failed:', e);
-        } finally {
-          setIsRegenerating(false);
+          console.error('Auto code generation failed:', e);
         }
-      }, 100);
+      }
+      
+      toast({
+        title: 'Video processed',
+        description: `${res.framesMono.length} frames @ ${Math.round(res.fps)} FPS (${res.width}x${res.height})${config.targetFrames ? ` (requested: ${config.targetFrames})` : ''}`,
+      });
+    } catch (e: any) {
+      console.error(e);
+      toast({ title: 'Processing failed', description: e?.message || 'Could not process video' });
+    } finally {
+      setIsProcessing(false);
+      isProcessingRef.current = false;
     }
-  }, [config.library, framesPacked.length, oledW, oledH, fps, isProcessing]);
+  }, [parseSize, toast]);
 
-  const handleGenerateCode = async () => {
+  // Main video processing effect with debouncing
+  useEffect(() => {
+    if (!selectedVideo) {
+      setFramesMono([]);
+      setFramesPacked([]);
+      setGeneratedCode(null);
+      setMaxFrames(0);
+      return;
+    }
+
+    // Clear any existing timeout
+    if (processingTimeoutRef.current) {
+      clearTimeout(processingTimeoutRef.current);
+    }
+
+    // Debounce video processing by 300ms
+    processingTimeoutRef.current = setTimeout(() => {
+      processVideoDebounced(selectedVideo, config);
+    }, 300);
+
+    return () => {
+      if (processingTimeoutRef.current) {
+        clearTimeout(processingTimeoutRef.current);
+        processingTimeoutRef.current = null;
+      }
+    };
+  }, [selectedVideo, config, processVideoDebounced]);
+
+  // Cleanup timeouts on unmount
+  useEffect(() => {
+    return () => {
+      if (processingTimeoutRef.current) {
+        clearTimeout(processingTimeoutRef.current);
+      }
+      if (codeGenerationTimeoutRef.current) {
+        clearTimeout(codeGenerationTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  // Debounced code regeneration function
+  const regenerateCodeDebounced = useCallback(async () => {
+    if (framesPacked.length === 0 || isProcessing) return;
+    
+    setIsRegenerating(true);
+    
+    // Clear any existing timeout
+    if (codeGenerationTimeoutRef.current) {
+      clearTimeout(codeGenerationTimeoutRef.current);
+    }
+    
+    // Small delay to make the regeneration visible and debounce rapid changes
+    codeGenerationTimeoutRef.current = setTimeout(() => {
+      try {
+        console.log('Regenerating code due to library change:', { 
+          library: config.library, 
+          frameCount: framesPacked.length
+        });
+        const code = generateArduinoCode(
+          framesPacked,
+          oledW,
+          oledH,
+          fps,
+          config.library as any
+        );
+        setGeneratedCode(code);
+        console.log('Regenerated Arduino code successfully, length:', code.length);
+      } catch (e: any) {
+        console.error('Code regeneration failed:', e);
+      } finally {
+        setIsRegenerating(false);
+      }
+    }, 150);
+  }, [framesPacked, oledW, oledH, fps, config.library, isProcessing]);
+
+  // Regenerate code when library changes (if we already have frames)
+  useEffect(() => {
+    regenerateCodeDebounced();
+    
+    return () => {
+      if (codeGenerationTimeoutRef.current) {
+        clearTimeout(codeGenerationTimeoutRef.current);
+        codeGenerationTimeoutRef.current = null;
+      }
+    };
+  }, [regenerateCodeDebounced]);
+
+  const handleGenerateCode = useCallback(async () => {
     if (!framesPacked.length) {
       toast({ title: 'No frames to generate', description: 'Upload a video first' });
       return;
@@ -185,117 +261,44 @@ const Index = () => {
     } finally {
       setIsGenerating(false);
     }
-  };
+  }, [framesPacked, oledW, oledH, fps, config.library, toast]);
 
-  const handleApplyFrameChanges = async () => {
+  const handleApplyFrameChanges = useCallback(async () => {
     if (!selectedVideo) {
       toast({ title: 'No video uploaded', description: 'Upload a video first' });
       return;
     }
     
-    setIsProcessing(true);
-    try {
-      const { w, h } = parseSize(config.displaySize);
-      const res = await processVideo(selectedVideo, {
-        width: w,
-        height: h,
-        orientation: config.orientation as any,
-        targetFps: DEFAULT_FPS,
-        maxFrames: MAX_FRAMES,
-        targetFrames: config.targetFrames,
-        threshold: 128,
-      });
-      
-      setFramesMono(res.framesMono);
-      setFramesPacked(res.framesPacked);
-      setOledW(res.width);
-      setOledH(res.height);
-      setFps(res.fps);
-      setDuration(res.duration);
-      
-      // Update max frames
-      const calculatedMaxFrames = Math.floor(res.duration * DEFAULT_FPS);
-      setMaxFrames(calculatedMaxFrames);
-      
-      // Generate new code with updated frames
-      if (res.framesPacked.length > 0) {
-        const code = generateArduinoCode(
-          res.framesPacked,
-          res.width,
-          res.height,
-          res.fps,
-          config.library as any
-        );
-        setGeneratedCode(code);
-      }
-      
-      toast({
-        title: 'Frame changes applied',
-        description: `${res.framesMono.length} frames @ ${Math.round(res.fps)} FPS (${res.width}x${res.height})`,
-      });
-    } catch (e: any) {
-      console.error(e);
-      toast({ title: 'Processing failed', description: e?.message || 'Could not apply frame changes' });
-    } finally {
-      setIsProcessing(false);
-    }
-  };
+    // Use the debounced processing function
+    await processVideoDebounced(selectedVideo, config);
+  }, [selectedVideo, config, processVideoDebounced, toast]);
 
-  const handleConfigChange = (newConfig: Config) => {
+  const handleConfigChange = useCallback((newConfig: Config) => {
     setConfig(newConfig);
     setGeneratedCode(null); // Clear generated code if config changes
     setMaxFrames(0); // Reset max frames
-  };
+  }, []);
 
-  const handleFrameCountChange = async (targetFrames: number) => {
+  const handleFrameCountChange = useCallback(async (targetFrames: number) => {
     if (!selectedVideo) {
       toast({ title: 'No video uploaded', description: 'Upload a video first' });
       return;
     }
-    setConfig(prev => ({ ...prev, targetFrames }));
+    
+    // Update config with new target frames (capped at 20)
+    const newConfig = { ...config, targetFrames: Math.min(targetFrames, 20) };
+    setConfig(newConfig);
     setGeneratedCode(null); // Clear generated code if targetFrames changes
     setMaxFrames(0); // Reset max frames
-    setIsProcessing(true);
-    try {
-      const { w, h } = parseSize(config.displaySize);
-      const res = await processVideo(selectedVideo, {
-        width: w,
-        height: h,
-        orientation: config.orientation as any,
-        targetFps: DEFAULT_FPS,
-        maxFrames: MAX_FRAMES,
-        targetFrames: targetFrames,
-        threshold: 128,
-      });
-      setFramesMono(res.framesMono);
-      setFramesPacked(res.framesPacked);
-      setOledW(res.width);
-      setOledH(res.height);
-      setFps(res.fps);
-      setDuration(res.duration);
-      const calculatedMaxFrames = Math.floor(res.duration * DEFAULT_FPS);
-      setMaxFrames(calculatedMaxFrames);
-      if (res.framesPacked.length > 0) {
-        const code = generateArduinoCode(
-          res.framesPacked,
-          res.width,
-          res.height,
-          res.fps,
-          config.library as any
-        );
-        setGeneratedCode(code);
-      }
-      toast({
-        title: 'Frame count applied',
-        description: `${res.framesMono.length} frames @ ${Math.round(res.fps)} FPS (${res.width}x${res.height})`,
-      });
-    } catch (e: any) {
-      console.error(e);
-      toast({ title: 'Processing failed', description: e?.message || 'Could not apply frame count' });
-    } finally {
-      setIsProcessing(false);
+    
+    // Clear any existing timeout
+    if (processingTimeoutRef.current) {
+      clearTimeout(processingTimeoutRef.current);
     }
-  };
+    
+    // Process immediately when user applies frame count changes
+    await processVideoDebounced(selectedVideo, newConfig);
+  }, [selectedVideo, config, processVideoDebounced, toast]);
 
   return (
     <div className="min-h-screen bg-gradient-hero">

@@ -1,28 +1,28 @@
 version: '3.8'
 
 services:
-  backend:
+  video-to-oled-backend:
     build: .
     ports:
       - "3001:3001"
     environment:
-      - NODE_ENV=development
+      - NODE_ENV=production
       - PORT=3001
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
-      - MAX_FILE_SIZE=50MB
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:5173}
+      - UPLOAD_DIR=/app/uploads
+      - TEMP_DIR=/app/temp
+      - MAX_FILE_SIZE=104857600
       - MAX_VIDEO_DURATION=30
       - TARGET_FPS=15
-      - MAX_FRAMES=300
-      - CORS_ORIGIN=http://localhost:5173
-      - UPLOAD_PATH=./uploads
-      - TEMP_PATH=./temp
-      - RATE_LIMIT_WINDOW_MS=900000
-      - RATE_LIMIT_MAX_REQUESTS=100
+      - MAX_FRAMES=20
+      - THRESHOLD=128
     volumes:
       - ./uploads:/app/uploads
       - ./temp:/app/temp
+      - ./logs:/app/logs
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"]
@@ -31,16 +31,49 @@ services:
       retries: 3
       start_period: 40s
 
-  # Optional: Redis for caching (uncomment if needed)
-  # redis:
-  #   image: redis:7-alpine
-  #   ports:
-  #     - "6379:6379"
-  #   volumes:
-  #     - redis_data:/data
-  #   restart: unless-stopped
+  # Optional: Add a reverse proxy
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - video-to-oled-backend
+    restart: unless-stopped
+    profiles:
+      - production
+
+  # Optional: Add monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-storage:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    profiles:
+      - monitoring
 
 volumes:
-  # redis_data:
-
-
+  grafana-storage:

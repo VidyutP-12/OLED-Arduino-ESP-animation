@@ -1,133 +1,118 @@
-import express from 'express';
-import multer from 'multer';
-import path from 'path';
-import fs from 'fs/promises';
-import { v4 as uuidv4 } from 'uuid';
-import { VideoProcessor } from '../services/videoProcessor.js';
-import { DatabaseService } from '../services/databaseService.js';
-import { authenticateUser, rateLimit, requirePremium } from '../middleware/auth.js';
-import { LIMITS, DISPLAY_SIZES } from '../config/supabase.js';
+const express = require('express');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs').promises;
+const { v4: uuidv4 } = require('uuid');
+const SupabaseService = require('../services/supabaseService');
+const VideoProcessor = require('../services/videoProcessor');
+const { authenticateToken, checkRateLimit, validateTier, logAnalytics, validateFileUpload } = require('../middleware/auth');
 
 const router = express.Router();
+const supabaseService = new SupabaseService();
 const videoProcessor = new VideoProcessor();
-const dbService = new DatabaseService();
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
-  destination: async (req, file, cb) => {
-    const uploadDir = process.env.UPLOAD_PATH || './uploads';
-    await fs.mkdir(uploadDir, { recursive: true });
+  destination: (req, file, cb) => {
+    const uploadDir = process.env.UPLOAD_DIR || './uploads';
     cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
-    const uniqueName = `${uuidv4()}-${Date.now()}${path.extname(file.originalname)}`;
+    const uniqueName = `${uuidv4()}_${file.originalname}`;
     cb(null, uniqueName);
   }
 });
 
-const upload = multer({
+const upload = multer({ 
   storage,
   limits: {
-    fileSize: LIMITS.MAX_FILE_SIZE,
+    fileSize: parseInt(process.env.MAX_FILE_SIZE) || 100 * 1024 * 1024, // 100MB
     files: 1
-  },
-  fileFilter: (req, file, cb) => {
-    const allowedTypes = ['video/mp4', 'video/avi', 'video/mov', 'video/mkv', 'video/webm'];
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Invalid file type. Only MP4, AVI, MOV, MKV, and WebM files are allowed.'), false);
-    }
   }
 });
 
-/**
- * Upload video file
- * POST /api/videos/upload
- */
+// Ensure upload directory exists
+const ensureUploadDir = async () => {
+  const uploadDir = process.env.UPLOAD_DIR || './uploads';
+  try {
+    await fs.mkdir(uploadDir, { recursive: true });
+  } catch (error) {
+    console.error('Error creating upload directory:', error);
+  }
+};
+
+ensureUploadDir();
+
+// Upload video endpoint
 router.post('/upload', 
-  authenticateUser, 
-  rateLimit(10, 60 * 1000), // 10 uploads per minute
+  authenticateToken,
+  checkRateLimit('video_upload', 10, 60), // 10 uploads per hour
   upload.single('video'),
+  validateFileUpload(),
+  logAnalytics('upload', 'video'),
   async (req, res) => {
     try {
-      if (!req.file) {
-        return res.status(400).json({
-          error: 'Bad Request',
-          message: 'No video file provided'
-        });
-      }
-
-      const filePath = req.file.path;
-      const fileSize = req.file.size;
-      const mimeType = req.file.mimetype;
-      const originalName = req.file.originalname;
-
+      const { originalname, filename, size, mimetype, path: filePath } = req.file;
+      
       // Get video metadata
       const metadata = await videoProcessor.getVideoMetadata(filePath);
-
+      
       // Create video upload record
       const uploadData = {
-        filename: originalName,
-        size: fileSize,
-        path: filePath,
-        mimeType,
+        original_filename: originalname,
+        file_size: size,
+        file_type: mimetype,
         duration: metadata.duration,
         width: metadata.width,
         height: metadata.height,
-        fps: metadata.fps
+        fps: metadata.fps,
+        upload_path: filePath,
+        status: 'pending',
+        metadata: {
+          bitrate: metadata.bitrate,
+          size: metadata.size
+        }
       };
 
-      const videoUpload = await dbService.createVideoUpload(req.user.id, uploadData);
-
-      // Track usage
-      await dbService.trackUsage(req.user.id, 'upload', {
-        fileSize,
-        duration: metadata.duration,
-        originalName
-      }, videoUpload.id);
+      const videoUpload = await supabaseService.createVideoUpload(req.user.id, uploadData);
 
       res.status(201).json({
-        message: 'Video uploaded successfully',
-        videoUpload: {
-          id: videoUpload.id,
-          filename: videoUpload.original_filename,
-          size: videoUpload.file_size,
-          duration: videoUpload.duration,
-          width: videoUpload.original_width,
-          height: videoUpload.original_height,
-          fps: videoUpload.original_fps,
-          status: videoUpload.status
+        success: true,
+        data: {
+          uploadId: videoUpload.id,
+          filename: originalname,
+          size: size,
+          duration: metadata.duration,
+          dimensions: `${metadata.width}x${metadata.height}`,
+          fps: metadata.fps
         }
       });
-
     } catch (error) {
-      console.error('Upload error:', error);
+      console.error('Video upload error:', error);
       
-      // Clean up uploaded file if it exists
-      if (req.file) {
+      // Cleanup uploaded file on error
+      if (req.file && req.file.path) {
         try {
           await fs.unlink(req.file.path);
         } catch (cleanupError) {
-          console.warn('Failed to cleanup uploaded file:', cleanupError.message);
+          console.error('Error cleaning up uploaded file:', cleanupError);
         }
       }
 
       res.status(500).json({
-        error: 'Upload Failed',
+        error: 'Video upload failed',
+        code: 'UPLOAD_FAILED',
         message: error.message
       });
     }
   }
 );
 
-/**
- * Process video with configuration
- * POST /api/videos/:uploadId/process
- */
+// Process video endpoint
 router.post('/:uploadId/process',
-  authenticateUser,
-  rateLimit(5, 60 * 1000), // 5 processing requests per minute
+  authenticateToken,
+  checkRateLimit('video_process', 20, 60), // 20 processes per hour
+  logAnalytics('process', 'video'),
   async (req, res) => {
     try {
       const { uploadId } = req.params;
@@ -135,371 +120,394 @@ router.post('/:uploadId/process',
         displaySize = '128x64',
         orientation = 'horizontal',
         library = 'adafruit_gfx_ssd1306',
-        targetFps = LIMITS.TARGET_FPS,
+        targetFps = 15,
         threshold = 128,
-        maxFrames = LIMITS.MAX_FRAMES
+        maxFrames = 20
       } = req.body;
 
-      // Validate display size
-      if (!DISPLAY_SIZES[displaySize]) {
-        return res.status(400).json({
-          error: 'Bad Request',
-          message: 'Invalid display size'
-        });
-      }
-
-      // Get video upload
-      const videoUpload = await dbService.getVideoUpload(uploadId);
+      // Get video upload record
+      const videoUpload = await supabaseService.getVideoUpload(uploadId, req.user.id);
       
       if (!videoUpload) {
         return res.status(404).json({
-          error: 'Not Found',
-          message: 'Video upload not found'
+          error: 'Video upload not found',
+          code: 'UPLOAD_NOT_FOUND'
         });
       }
 
-      // Check ownership
-      if (videoUpload.user_id !== req.user.id) {
-        return res.status(403).json({
-          error: 'Forbidden',
-          message: 'Access denied'
+      if (videoUpload.status !== 'pending') {
+        return res.status(400).json({
+          error: 'Video is already being processed or has been processed',
+          code: 'ALREADY_PROCESSED'
         });
       }
 
       // Update status to processing
-      await dbService.updateVideoUploadStatus(uploadId, 'processing');
+      await supabaseService.updateVideoUpload(uploadId, req.user.id, {
+        status: 'processing'
+      });
 
-      // Create processing configuration
-      const config = {
-        displayWidth: DISPLAY_SIZES[displaySize].width,
-        displayHeight: DISPLAY_SIZES[displaySize].height,
+      // Process video asynchronously
+      processVideoAsync(uploadId, req.user.id, videoUpload.upload_path, {
+        displaySize,
         orientation,
         library,
         targetFps,
         threshold,
-        maxFrames,
-        duration: videoUpload.duration
-      };
-
-      const processingConfig = await dbService.createProcessingConfig(uploadId, config);
-
-      // Process video asynchronously
-      processVideoAsync(uploadId, processingConfig.id, videoUpload.file_path, config);
-
-      res.json({
-        message: 'Video processing started',
-        uploadId,
-        configId: processingConfig.id,
-        status: 'processing'
+        maxFrames
       });
 
+      res.status(202).json({
+        success: true,
+        message: 'Video processing started',
+        uploadId: uploadId
+      });
     } catch (error) {
-      console.error('Processing error:', error);
+      console.error('Video processing error:', error);
       res.status(500).json({
-        error: 'Processing Failed',
+        error: 'Video processing failed',
+        code: 'PROCESS_FAILED',
         message: error.message
       });
     }
   }
 );
 
-/**
- * Get processing status
- * GET /api/videos/:uploadId/status
- */
+// Get processing status
 router.get('/:uploadId/status',
-  authenticateUser,
+  authenticateToken,
   async (req, res) => {
     try {
       const { uploadId } = req.params;
       
-      const videoUpload = await dbService.getVideoUpload(uploadId);
+      const videoUpload = await supabaseService.getVideoUpload(uploadId, req.user.id);
       
       if (!videoUpload) {
         return res.status(404).json({
-          error: 'Not Found',
-          message: 'Video upload not found'
-        });
-      }
-
-      // Check ownership
-      if (videoUpload.user_id !== req.user.id) {
-        return res.status(403).json({
-          error: 'Forbidden',
-          message: 'Access denied'
+          error: 'Video upload not found',
+          code: 'UPLOAD_NOT_FOUND'
         });
       }
 
       res.json({
-        uploadId,
-        status: videoUpload.status,
-        errorMessage: videoUpload.error_message,
-        processedVideos: videoUpload.processed_videos || []
+        success: true,
+        data: {
+          uploadId: videoUpload.id,
+          status: videoUpload.status,
+          filename: videoUpload.original_filename,
+          size: videoUpload.file_size,
+          duration: videoUpload.duration,
+          dimensions: videoUpload.width && videoUpload.height ? 
+            `${videoUpload.width}x${videoUpload.height}` : null,
+          fps: videoUpload.fps,
+          createdAt: videoUpload.created_at,
+          updatedAt: videoUpload.updated_at
+        }
       });
-
     } catch (error) {
       console.error('Status check error:', error);
       res.status(500).json({
-        error: 'Status Check Failed',
+        error: 'Status check failed',
+        code: 'STATUS_CHECK_FAILED',
         message: error.message
       });
     }
   }
 );
 
-/**
- * Get processed video with Arduino code
- * GET /api/videos/processed/:processedId
- */
+// Get processed video
 router.get('/processed/:processedId',
-  authenticateUser,
+  authenticateToken,
   async (req, res) => {
     try {
       const { processedId } = req.params;
       
-      const processedVideo = await dbService.getProcessedVideo(processedId);
+      const processedVideo = await supabaseService.getProcessedVideo(processedId, req.user.id);
       
       if (!processedVideo) {
         return res.status(404).json({
-          error: 'Not Found',
-          message: 'Processed video not found'
+          error: 'Processed video not found',
+          code: 'PROCESSED_VIDEO_NOT_FOUND'
         });
       }
-
-      // Check ownership
-      if (processedVideo.video_uploads.user_id !== req.user.id) {
-        return res.status(403).json({
-          error: 'Forbidden',
-          message: 'Access denied'
-        });
-      }
-
-      // Track usage
-      await dbService.trackUsage(req.user.id, 'download', {
-        processedId,
-        frameCount: processedVideo.processed_frames_count
-      }, processedVideo.video_upload_id);
 
       res.json({
-        processedVideo: {
+        success: true,
+        data: {
           id: processedVideo.id,
-          frameCount: processedVideo.processed_frames_count,
-          width: processedVideo.final_width,
-          height: processedVideo.final_height,
-          fps: processedVideo.final_fps,
-          processingTime: processedVideo.processing_time_ms,
-          arduinoCode: processedVideo.arduino_code,
-          previewGifPath: processedVideo.preview_gif_path,
-          config: processedVideo.processing_configs
+          displaySize: processedVideo.display_size,
+          orientation: processedVideo.orientation,
+          library: processedVideo.library,
+          frameCount: processedVideo.frame_count,
+          width: processedVideo.width,
+          height: processedVideo.height,
+          fps: processedVideo.actual_fps,
+          duration: processedVideo.duration,
+          codeSize: processedVideo.code_size,
+          processingTime: processedVideo.processing_time,
+          status: processedVideo.status,
+          createdAt: processedVideo.created_at,
+          expiresAt: processedVideo.expires_at
         }
       });
-
     } catch (error) {
       console.error('Get processed video error:', error);
       res.status(500).json({
-        error: 'Failed to Get Processed Video',
+        error: 'Failed to get processed video',
+        code: 'GET_PROCESSED_VIDEO_FAILED',
         message: error.message
       });
     }
   }
 );
 
-/**
- * Download Arduino code as .ino file
- * GET /api/videos/processed/:processedId/download
- */
+// Download Arduino code
 router.get('/processed/:processedId/download',
-  authenticateUser,
+  authenticateToken,
+  checkRateLimit('download', 50, 60), // 50 downloads per hour
+  logAnalytics('download', 'code'),
   async (req, res) => {
     try {
       const { processedId } = req.params;
       
-      const processedVideo = await dbService.getProcessedVideo(processedId);
+      const processedVideo = await supabaseService.getProcessedVideo(processedId, req.user.id);
       
       if (!processedVideo) {
         return res.status(404).json({
-          error: 'Not Found',
-          message: 'Processed video not found'
+          error: 'Processed video not found',
+          code: 'PROCESSED_VIDEO_NOT_FOUND'
         });
       }
 
-      // Check ownership
-      if (processedVideo.video_uploads.user_id !== req.user.id) {
-        return res.status(403).json({
-          error: 'Forbidden',
-          message: 'Access denied'
+      if (processedVideo.status !== 'completed') {
+        return res.status(400).json({
+          error: 'Video processing not completed',
+          code: 'PROCESSING_NOT_COMPLETE'
         });
       }
-
-      // Track usage
-      await dbService.trackUsage(req.user.id, 'download', {
-        processedId,
-        frameCount: processedVideo.processed_frames_count
-      }, processedVideo.video_upload_id);
 
       // Set headers for file download
-      const filename = `video_to_oled_${processedId}.ino`;
       res.setHeader('Content-Type', 'text/plain');
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      
-      res.send(processedVideo.arduino_code);
+      res.setHeader('Content-Disposition', `attachment; filename="video_to_oled_${processedId}.ino"`);
+      res.setHeader('Content-Length', processedVideo.code_size);
 
+      // Send the Arduino code
+      res.send(processedVideo.arduino_code);
     } catch (error) {
       console.error('Download error:', error);
       res.status(500).json({
-        error: 'Download Failed',
+        error: 'Download failed',
+        code: 'DOWNLOAD_FAILED',
         message: error.message
       });
     }
   }
 );
 
-/**
- * Get user's video uploads
- * GET /api/videos
- */
-router.get('/',
-  authenticateUser,
+// Get user's video uploads
+router.get('/uploads',
+  authenticateToken,
   async (req, res) => {
     try {
-      const { limit = 20, offset = 0 } = req.query;
+      const { limit = 50, offset = 0 } = req.query;
       
-      const uploads = await dbService.getUserVideoUploads(
+      const uploads = await supabaseService.getUserVideoUploads(
         req.user.id,
         parseInt(limit),
         parseInt(offset)
       );
 
       res.json({
-        uploads,
-        pagination: {
-          limit: parseInt(limit),
-          offset: parseInt(offset),
-          hasMore: uploads.length === parseInt(limit)
-        }
+        success: true,
+        data: uploads.map(upload => ({
+          id: upload.id,
+          filename: upload.original_filename,
+          size: upload.file_size,
+          duration: upload.duration,
+          dimensions: upload.width && upload.height ? 
+            `${upload.width}x${upload.height}` : null,
+          fps: upload.fps,
+          status: upload.status,
+          createdAt: upload.created_at,
+          expiresAt: upload.expires_at
+        }))
       });
-
     } catch (error) {
       console.error('Get uploads error:', error);
       res.status(500).json({
-        error: 'Failed to Get Uploads',
+        error: 'Failed to get uploads',
+        code: 'GET_UPLOADS_FAILED',
         message: error.message
       });
     }
   }
 );
 
-/**
- * Delete video upload
- * DELETE /api/videos/:uploadId
- */
+// Get user's processed videos
+router.get('/processed',
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const { limit = 50, offset = 0 } = req.query;
+      
+      const processedVideos = await supabaseService.getUserProcessedVideos(
+        req.user.id,
+        parseInt(limit),
+        parseInt(offset)
+      );
+
+      res.json({
+        success: true,
+        data: processedVideos.map(video => ({
+          id: video.id,
+          uploadId: video.upload_id,
+          filename: video.video_uploads?.original_filename,
+          displaySize: video.display_size,
+          orientation: video.orientation,
+          library: video.library,
+          frameCount: video.frame_count,
+          width: video.width,
+          height: video.height,
+          fps: video.actual_fps,
+          duration: video.duration,
+          codeSize: video.code_size,
+          processingTime: video.processing_time,
+          status: video.status,
+          createdAt: video.created_at,
+          expiresAt: video.expires_at
+        }))
+      });
+    } catch (error) {
+      console.error('Get processed videos error:', error);
+      res.status(500).json({
+        error: 'Failed to get processed videos',
+        code: 'GET_PROCESSED_VIDEOS_FAILED',
+        message: error.message
+      });
+    }
+  }
+);
+
+// Delete video upload
 router.delete('/:uploadId',
-  authenticateUser,
+  authenticateToken,
+  logAnalytics('delete', 'video'),
   async (req, res) => {
     try {
       const { uploadId } = req.params;
       
-      const videoUpload = await dbService.getVideoUpload(uploadId);
+      const videoUpload = await supabaseService.getVideoUpload(uploadId, req.user.id);
       
       if (!videoUpload) {
         return res.status(404).json({
-          error: 'Not Found',
-          message: 'Video upload not found'
+          error: 'Video upload not found',
+          code: 'UPLOAD_NOT_FOUND'
         });
       }
 
-      // Check ownership
-      if (videoUpload.user_id !== req.user.id) {
-        return res.status(403).json({
-          error: 'Forbidden',
-          message: 'Access denied'
-        });
-      }
-
-      // Delete from database
-      await dbService.deleteVideoUpload(uploadId);
-
-      // Delete file from filesystem
+      // Delete the file from disk
       try {
-        await fs.unlink(videoUpload.file_path);
+        await fs.unlink(videoUpload.upload_path);
       } catch (fileError) {
-        console.warn('Failed to delete video file:', fileError.message);
+        console.error('Error deleting file:', fileError);
       }
+
+      // Delete from database (this will cascade to processed videos and frame data)
+      await supabaseService.client
+        .from('video_uploads')
+        .delete()
+        .eq('id', uploadId)
+        .eq('user_id', req.user.id);
 
       res.json({
+        success: true,
         message: 'Video upload deleted successfully'
       });
-
     } catch (error) {
-      console.error('Delete error:', error);
+      console.error('Delete upload error:', error);
       res.status(500).json({
-        error: 'Delete Failed',
+        error: 'Failed to delete upload',
+        code: 'DELETE_UPLOAD_FAILED',
         message: error.message
       });
     }
   }
 );
 
-/**
- * Async function to process video
- */
-async function processVideoAsync(uploadId, configId, videoPath, config) {
-  const tempDir = path.join(process.env.TEMP_PATH || './temp', uuidv4());
-  
+// Async function to process video
+async function processVideoAsync(uploadId, userId, filePath, options) {
   try {
     console.log(`Starting video processing for upload ${uploadId}`);
     
-    // Extract frames
-    const processingStart = Date.now();
-    const result = await videoProcessor.extractFrames(videoPath, tempDir, config);
-    const processingTime = Date.now() - processingStart;
-
+    // Process the video
+    const result = await videoProcessor.extractFrames(filePath, options);
+    
     // Generate Arduino code
-    const arduinoCode = videoProcessor.generateArduinoCode(result.frames, {
-      width: result.width,
-      height: result.height,
-      fps: result.fps,
-      library: config.library
-    });
-
-    // Calculate total frame data size
-    const frameDataSize = result.frames.reduce((total, frame) => total + frame.length, 0);
+    const arduinoCode = videoProcessor.generateArduinoCode(
+      result.framesPacked,
+      result.width,
+      result.height,
+      result.fps,
+      options.library
+    );
 
     // Create processed video record
-    const processedData = {
-      frameCount: result.frameCount,
+    const processedVideoData = {
+      upload_id: uploadId,
+      display_size: options.displaySize,
+      orientation: options.orientation,
+      library: options.library,
+      target_fps: options.targetFps,
+      actual_fps: result.fps,
+      frame_count: result.frameCount,
       width: result.width,
       height: result.height,
-      fps: result.fps,
-      frameDataSize,
-      processingTime,
-      arduinoCode,
-      previewGifPath: null // TODO: Generate preview GIF
+      duration: result.duration,
+      arduino_code: arduinoCode,
+      code_size: Buffer.byteLength(arduinoCode, 'utf8'),
+      processing_time: Date.now() - new Date().getTime(), // This should be calculated properly
+      status: 'completed',
+      metadata: {
+        originalFps: result.metadata.fps,
+        originalWidth: result.metadata.width,
+        originalHeight: result.metadata.height,
+        bitrate: result.metadata.bitrate
+      }
     };
 
-    const processedVideo = await dbService.createProcessedVideo(uploadId, configId, processedData);
+    const processedVideo = await supabaseService.createProcessedVideo(userId, processedVideoData);
 
-    // Store frame data
-    await dbService.storeFrameData(processedVideo.id, result.frames);
+    // Save frame data
+    for (let i = 0; i < result.framesPacked.length; i++) {
+      await supabaseService.saveFrameData(processedVideo.id, i, result.framesPacked[i]);
+    }
 
-    // Update upload status to completed
-    await dbService.updateVideoUploadStatus(uploadId, 'completed');
+    // Update video upload status
+    await supabaseService.updateVideoUpload(uploadId, userId, {
+      status: 'completed'
+    });
 
-    console.log(`Video processing completed for upload ${uploadId}`);
+    // Update user statistics
+    await supabaseService.updateUserProfile(userId, {
+      total_conversions: supabaseService.client.raw('total_conversions + 1'),
+      total_processing_time: supabaseService.client.raw(`total_processing_time + ${processedVideoData.processing_time}`)
+    });
 
+    console.log(`Video processing completed for upload ${uploadId}, processed video ${processedVideo.id}`);
+    
   } catch (error) {
     console.error(`Video processing failed for upload ${uploadId}:`, error);
     
-    // Update upload status to failed
-    await dbService.updateVideoUploadStatus(uploadId, 'failed', error.message);
-  } finally {
-    // Clean up temporary files
-    await videoProcessor.cleanupTempFiles(tempDir);
+    // Update video upload status to failed
+    try {
+      await supabaseService.updateVideoUpload(uploadId, userId, {
+        status: 'failed',
+        metadata: { error: error.message }
+      });
+    } catch (updateError) {
+      console.error('Error updating upload status to failed:', updateError);
+    }
   }
 }
 
-export default router;
-
-
-
-
+module.exports = router;

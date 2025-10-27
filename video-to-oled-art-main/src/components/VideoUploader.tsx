@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Upload, Video, X } from 'lucide-react';
@@ -13,17 +13,17 @@ export const VideoUploader = ({ onVideoSelect, selectedVideo }: VideoUploaderPro
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleDragOver = (e: React.DragEvent) => {
+  const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(true);
-  };
+  }, []);
 
-  const handleDragLeave = (e: React.DragEvent) => {
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-  };
+  }, []);
 
-  const handleDrop = (e: React.DragEvent) => {
+  const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
     
@@ -33,29 +33,29 @@ export const VideoUploader = ({ onVideoSelect, selectedVideo }: VideoUploaderPro
     if (videoFile) {
       onVideoSelect(videoFile);
     }
-  };
+  }, [onVideoSelect]);
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       onVideoSelect(file);
     }
-  };
+  }, [onVideoSelect]);
 
-  const removeVideo = () => {
+  const removeVideo = useCallback(() => {
     onVideoSelect(null as any);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
-  };
+  }, [onVideoSelect]);
 
-  const formatFileSize = (bytes: number) => {
+  const formatFileSize = useCallback((bytes: number) => {
     if (bytes === 0) return '0 Bytes';
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-  };
+  }, []);
 
   return (
     <Card className="p-6 bg-gradient-card border-tech-border">
